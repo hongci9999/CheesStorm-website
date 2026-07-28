@@ -3,6 +3,7 @@ import {
   heroScrimStats, mapScrimStats, firstPickSummary,
   synergyPairs, counterPairs, roleCompStats, distinctPatches,
   firstPickHeroStats, openBanHeroStats, seriesHeroStats,
+  heroTierGroups, type HeroScrimStat,
 } from '../scrim-stats';
 import { seriesLockedHeroes } from '../scrim';
 import type { Scrim } from '../scrim';
@@ -206,6 +207,47 @@ describe('seriesHeroStats', () => {
   it('세트 관여율 — 등장 세트 / 전체 세트', () => {
     expect(of('겐지').seriesRate).toBe(1);
     expect(of('요한나').seriesRate).toBe(1);
+  });
+});
+
+describe('heroTierGroups', () => {
+  // 관여율만 보는 함수라 나머지 필드는 채우지 않는다
+  const stat = (hero: string, presenceRate: number) => ({ hero, presenceRate } as HeroScrimStat);
+  const tiers = (rates: number[]) =>
+    heroTierGroups(rates.map((r, i) => stat(`h${i}`, r))).map((g) => g.heroes.map((h) => h.presenceRate));
+
+  it('군집대로 자른다', () => {
+    expect(tiers([0.9, 0.85, 0.5, 0.48, 0.1])).toEqual([[0.9, 0.85], [0.5, 0.48], [0.1]]);
+  });
+
+  it('값이 촘촘히 몰려 있으면 한 티어 — GVF가 억지로 쪼개는 걸 낙차 하한이 막는다', () => {
+    expect(tiers([0.5, 0.48, 0.46, 0.44])).toEqual([[0.5, 0.48, 0.46, 0.44]]);
+  });
+
+  it('꼬리가 길어도 상위권이 한 덩어리로 뭉치지 않는다', () => {
+    // 20판 스크림의 현실 분포(5%p 양자화) — 이전 낙차 방식은 여기서 2티어로 뭉갰다
+    const rates = [0.69, 0.65, 0.62, 0.61, 0.55, 0.5, 0.45, 0.4, 0.4, 0.35,
+      0.3, 0.3, 0.25, 0.25, 0.2, 0.2, 0.15, 0.15, 0.1, 0.1, 0.1, 0.05, 0.05];
+    const groups = heroTierGroups(rates.map((r, i) => stat(`h${i}`, r)));
+    expect(groups.length).toBeGreaterThanOrEqual(3);
+    // 1티어가 전체의 절반을 삼키면 티어 구실을 못 한다
+    expect(groups[0].heroes.length).toBeLessThan(rates.length / 2);
+    expect(groups.flatMap((g) => g.heroes)).toHaveLength(rates.length);
+    expect(groups.map((g) => g.tier)).toEqual(groups.map((_, i) => i + 1));
+    // 티어 경계는 내림차순 유지
+    groups.slice(1).forEach((g, i) => expect(g.top).toBeLessThan(groups[i].bottom));
+  });
+
+  it('최상위가 압도적이어도 나머지를 2티어에 몰아넣지 않는다', () => {
+    // 100/100/95/90 뒤로 30%부터 완만한 꼬리 — 컷 하나로 GVF가 채워지던 회귀 케이스
+    const rates = [1, 1, 0.95, 0.9, 0.3, 0.25, 0.25, 0.2, 0.2, 0.15, 0.15,
+      0.1, 0.1, 0.1, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05];
+    const groups = heroTierGroups(rates.map((r, i) => stat(`h${i}`, r)));
+    expect(groups.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('빈 입력', () => {
+    expect(heroTierGroups([])).toEqual([]);
   });
 });
 

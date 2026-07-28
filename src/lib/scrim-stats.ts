@@ -88,6 +88,103 @@ export function heroScrimStats(
     .sort((a, b) => b.presenceRate - a.presenceRate || b.picks - a.picks || a.hero.localeCompare(b.hero, 'ko'));
 }
 
+// ── 관여율 군집 → 티어 ────────────────────────────────────────
+// 밴픽률은 고르게 퍼지지 않고 계단식으로 뭉친다. 고정 구간(60%/50%/…)으로 자르면
+// 표본이 적은 패치에서 티어가 통째로 비거나 한 티어에 다 몰린다.
+//
+// 이웃 낙차만 보고 자르는 방식은 실데이터에서 실패한다 — 경기 수가 적으면 관여율이
+// 5%p 단위로 양자화돼 큰 낙차가 최상위에만 생기고, 나머지가 전부 한 티어로 뭉친다.
+// 그래서 Jenks 자연 분류(1차원 k-means, 정확해를 DP로) 로 군집 자체를 찾는다:
+// 군집 내 분산 합(SSE)이 최소가 되게 자르고, 티어 수 k는 설명력(GVF)이 목표치를
+// 넘는 가장 작은 값으로 잡는다 — 군집이 몇 개든 데이터가 정한다.
+
+// GVF = 1 - SSE_k/SSE_1 — 이 정도면 계단 구조를 설명했다고 본다.
+// 0.95면 최상위 몇 명이 압도적일 때 그 컷 하나로 목표가 채워져 "1티어 소수 + 2티어 전부"가 된다.
+// 0.99까지 올리면 반대로 한 명짜리 티어가 줄줄이 생긴다. 0.97이 실제 분포에서 3~6티어로 떨어짐.
+const TIER_GVF_TARGET = 0.97;
+// k 탐색 상한. 티어가 이보다 잘게 쪼개지면 사람이 티어로 못 읽는다
+const MAX_TIER_SEARCH = 8;
+// GVF는 상대 지표라 값이 촘촘히 몰려 있어도 억지로 쪼갠다.
+// 관여율 폭이 이보다 좁으면 애초에 티어라 부를 계단이 없다고 보고 한 덩어리로 둔다.
+const MIN_TIER_SPAN = 0.1;
+
+export interface HeroTierGroup {
+  tier: number;              // 1티어부터
+  heroes: HeroScrimStat[];
+  top: number; bottom: number; // 그룹 관여율 상·하한
+}
+
+// 연속 구간 [a,b)의 SSE를 누적합으로 O(1) 계산 → DP 전체가 O(k·n²)
+function sseFactory(v: number[]) {
+  const s = [0], q = [0];
+  v.forEach((x, i) => { s.push(s[i] + x); q.push(q[i] + x * x); });
+  return (a: number, b: number) => {
+    const n = b - a;
+    if (n <= 1) return 0;
+    const sum = s[b] - s[a];
+    return Math.max(0, (q[b] - q[a]) - (sum * sum) / n);
+  };
+}
+
+// 정렬된 값들을 k개 연속 군집으로 최적 분할 (Jenks / 1D k-means 정확해).
+// 반환: 각 k에 대한 [총 SSE, 컷 위치 배열]
+function bestSplits(v: number[], maxK: number) {
+  const n = v.length;
+  const sse = sseFactory(v);
+  // cost[k][i] = 앞 i개를 k군집으로 나눈 최소 SSE, from[k][i] = 마지막 군집 시작점
+  const cost: number[][] = [[], Array.from({ length: n + 1 }, (_, i) => sse(0, i))];
+  const from: number[][] = [[], Array(n + 1).fill(0)];
+
+  for (let k = 2; k <= maxK; k++) {
+    cost[k] = Array(n + 1).fill(Infinity);
+    from[k] = Array(n + 1).fill(0);
+    for (let i = k; i <= n; i++) {
+      for (let j = k - 1; j < i; j++) {
+        const c = cost[k - 1][j] + sse(j, i);
+        if (c < cost[k][i]) { cost[k][i] = c; from[k][i] = j; }
+      }
+    }
+  }
+
+  return (k: number) => {
+    const cuts: number[] = [];
+    let i = n;
+    for (let kk = k; kk > 1; kk--) { i = from[kk][i]; cuts.unshift(i); }
+    return { sse: cost[k][n], cuts };
+  };
+}
+
+// stats는 heroScrimStats 결과(관여율 내림차순) 전제.
+export function heroTierGroups(stats: HeroScrimStat[]): HeroTierGroup[] {
+  if (stats.length === 0) return [];
+
+  const v = stats.map((s) => s.presenceRate);
+  const maxK = Math.min(MAX_TIER_SEARCH, v.length);
+  const split = bestSplits(v, maxK);
+  const total = split(1).sse;
+
+  // 값이 전부 같거나(SSE 0) 폭이 너무 좁으면 나눌 계단이 없다
+  let cuts: number[] = [];
+  if (total > 0 && v[0] - v[v.length - 1] >= MIN_TIER_SPAN) {
+    for (let k = 2; k <= maxK; k++) {
+      const r = split(k);
+      cuts = r.cuts;
+      if (1 - r.sse / total >= TIER_GVF_TARGET) break;
+    }
+  }
+
+  const bounds = [0, ...cuts, stats.length];
+  return bounds.slice(0, -1).map((start, i) => {
+    const heroes = stats.slice(start, bounds[i + 1]);
+    return {
+      tier: i + 1,
+      heroes,
+      top: heroes[0].presenceRate,
+      bottom: heroes[heroes.length - 1].presenceRate,
+    };
+  });
+}
+
 // ── 맵별 · 선픽 통계 ─────────────────────────────────────────
 
 export interface MapScrimStat {

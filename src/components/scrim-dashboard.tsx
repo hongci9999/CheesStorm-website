@@ -14,14 +14,12 @@ import {
   heroScrimStats, mapScrimStats, firstPickSummary,
   synergyPairs, counterPairs, distinctPatches, MIN_PAIR_GAMES,
   firstPickHeroStats, openBanHeroStats, seriesHeroStats, MIN_SERIES_GAMES,
+  heroTierGroups,
 } from '@/lib/scrim-stats';
 import { assignScrimNumbers, seriesLockedHeroes, type Scrim, type ScrimNumber } from '@/lib/scrim';
 
 export const pct = (v: number) => `${Math.round(v * 100)}%`;
 export const rateColor = (v: number) => (v >= 0.5 ? 'var(--win)' : 'var(--loss)');
-
-// 대시보드에서 보여줄 영웅 메타 상위 행 수 — 전체는 /scrims/heroes
-const HERO_TOP_N = 8;
 
 // ── 공통 스타일 (영웅 메타 상세 페이지에서도 재사용) ──────────
 export const sectionCard: CSSProperties = {
@@ -210,6 +208,7 @@ export default function ScrimDashboard({ scrims }: { scrims: Scrim[] }) {
   const { filtered, byPatch, locks } = f;
 
   const heroes = useMemo(() => heroScrimStats(filtered, locks), [filtered, locks]);
+  const heroTiers = useMemo(() => heroTierGroups(heroes), [heroes]);
   const fp = useMemo(() => firstPickSummary(filtered), [filtered]);
   const seriesStats = useMemo(() => seriesHeroStats(byPatch), [byPatch]);
   const depthPicks = useMemo(() => seriesStats.filter((s) => s.isDepth), [seriesStats]);
@@ -223,27 +222,18 @@ export default function ScrimDashboard({ scrims }: { scrims: Scrim[] }) {
     return <EmptyHint>기록된 스크림이 없습니다. 밴픽 탭에서 경기를 기록하면 통계가 쌓입니다.</EmptyHint>;
   }
 
-  // 데스크톱 배치: 1행 = 영웅 / 오프닝 밴 / 1픽, 2행 = 조합·대응 카드 5개 한 줄(내부 세로 스크롤)
+  // 데스크톱 배치: 영웅 메타가 한 행을 통째로, 그 아래 나머지 카드는 2열씩
   const desktop = bp === 'desktop';
-  const bentoGrid: CSSProperties = desktop
-    ? {
-        display: 'grid', gap: 'var(--sp-4)', alignItems: 'start',
-        gridTemplateColumns: 'minmax(0, 1.15fr) minmax(0, 0.85fr) minmax(0, 1fr)',
-        gridTemplateAreas: `"hero openban firstpick"`,
-      }
-    : { display: 'grid', gap: 'var(--sp-4)' };
-  const area = (name: string): CSSProperties => (desktop ? { gridArea: name } : {});
-  // 조합 카드: 시너지·카운터 반반
+  // 2열 행 — 오프닝밴/1픽, 시너지/카운터, 세트/뎁스 공용
   const pairRow: CSSProperties = desktop
     ? {
         display: 'grid', gap: 'var(--sp-4)', alignItems: 'start',
         gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-        gridTemplateAreas: `"synergy counters"`,
       }
     : { display: 'grid', gap: 'var(--sp-4)' };
   // 목록이 길어지면 카드 안에서 세로 스크롤
   const scrollBox: CSSProperties = { maxHeight: 340, overflowY: 'auto' };
-  // 상단 3박스(영웅/오프닝밴/1픽)는 높이 고정 — 내용 많으면 스크롤, 적어도 박스 유지
+  // 오프닝밴/1픽 두 박스는 높이 고정 — 내용 많으면 스크롤, 적어도 박스 유지
   const fixedBox: CSSProperties = { height: 340, overflowY: 'auto' };
 
   return (
@@ -264,74 +254,57 @@ export default function ScrimDashboard({ scrims }: { scrims: Scrim[] }) {
         ))}
       </div>
 
-      <div style={bentoGrid}>
-        {/* 영웅 메타 — 상위 N개만, 상세는 별도 페이지 */}
-        <section style={{ ...sectionCard, ...area('hero') }}>
-          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 'var(--sp-2)' }}>
-            <h2 style={sectionTitle}>영웅 메타 TOP {HERO_TOP_N}</h2>
-            <span style={sectionHint}>관여율 = (밴+픽)/가용 경기</span>
-          </div>
-          <div style={{ ...fixedBox, overflowX: 'auto' }}>
-            <table style={{ borderCollapse: 'collapse', width: '100%' }}>
-              <thead>
-                <tr>
-                  <th style={{ ...th, textAlign: 'left' }}>영웅</th>
-                  <th style={th}>관여율</th>
-                  <th style={th}>밴</th>
-                  <th style={th}>픽</th>
-                  <th style={th}>픽 승률</th>
-                </tr>
-              </thead>
-              <tbody>
-                {heroes.slice(0, HERO_TOP_N).map((h) => (
-                  <tr key={h.hero} style={{ borderBottom: '1px solid color-mix(in srgb, var(--border-line) 55%, transparent)' }}>
-                    <td style={tdLeft}><HeroCell hero={h.hero} /></td>
-                    <td style={{ ...td, fontWeight: 700, color: 'var(--text-high)' }}>{pct(h.presenceRate)}</td>
-                    <td style={td}>{h.bans}</td>
-                    <td style={td}>{h.picks}</td>
-                    <td style={{ ...td, color: h.picks ? rateColor(h.pickWinRate) : 'var(--text-faint)' }}>
-                      {h.picks ? `${pct(h.pickWinRate)} (${h.pickWins}/${h.picks})` : '—'}
-                    </td>
-                  </tr>
+      {/* 영웅 메타 — 한 행 통째로. 관여율 낙차로 티어를 갈라 보여준다 */}
+      <section style={sectionCard}>
+        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 'var(--sp-2)' }}>
+          <h2 style={sectionTitle}>영웅 메타</h2>
+          <span style={sectionHint}>칩 = 관여율 · 픽 승률 · 티어는 관여율이 뚝 떨어지는 지점에서 자동 분할</span>
+        </div>
+        {/* 티어별 한 줄 — 영웅은 칩으로 가로로 흘린다. 숫자 상세는 칩 툴팁·상세 페이지 */}
+        <div style={{ maxHeight: 520, overflowY: 'auto', display: 'grid', gap: 'var(--sp-3)' }}>
+          {heroTiers.map((g) => (
+            <div key={g.tier} style={{
+              display: 'grid', gridTemplateColumns: desktop ? '92px minmax(0, 1fr)' : '1fr',
+              gap: 'var(--sp-2)', alignItems: 'start',
+              paddingBottom: 'var(--sp-3)',
+              borderBottom: '1px solid color-mix(in srgb, var(--border-line) 55%, transparent)' }}>
+              <div>
+                <div style={{ fontFamily: 'var(--font-display)', fontWeight: 800,
+                  fontSize: 'var(--fs-md)', color: 'var(--text-high)' }}>{g.tier}티어</div>
+                <div style={sectionHint}>{pct(g.bottom)}~{pct(g.top)} · {g.heroes.length}영웅</div>
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {g.heroes.map((h) => (
+                  <span key={h.hero}
+                    title={`${h.hero} — 관여율 ${pct(h.presenceRate)} · 밴 ${h.bans} · 픽 ${h.picks}${h.picks ? ` · 픽 승률 ${pct(h.pickWinRate)} (${h.pickWins}/${h.picks})` : ''}`}
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 6,
+                      padding: '3px 8px 3px 3px', borderRadius: 'var(--r-pill)',
+                      border: '1px solid var(--border-line)', background: 'var(--surface-sunken, transparent)' }}>
+                    <HexAvatar name={h.hero} imageUrl={heroImageUrl(h.hero)} ring="var(--border-strong)" size={22} />
+                    <span style={{ fontFamily: 'var(--font-ui)', fontSize: 'var(--fs-xs)',
+                      fontWeight: 600, color: 'var(--text-high)' }}>{h.hero}</span>
+                    <span style={{ fontFamily: 'var(--font-numeral)', fontSize: 'var(--fs-2xs)',
+                      fontWeight: 700, color: 'var(--text-muted)' }}>{pct(h.presenceRate)}</span>
+                    <span style={{ fontFamily: 'var(--font-numeral)', fontSize: 'var(--fs-2xs)',
+                      color: h.picks ? rateColor(h.pickWinRate) : 'var(--text-faint)' }}>
+                      {h.picks ? pct(h.pickWinRate) : '—'}
+                    </span>
+                  </span>
                 ))}
-              </tbody>
-            </table>
-          </div>
-          <Link href="/scrims/heroes" style={{
-            justifySelf: 'end', fontFamily: 'var(--font-ui)', fontWeight: 700,
-            fontSize: 'var(--fs-xs)', color: 'var(--cheese-green)', textDecoration: 'none' }}>
-            전체 {heroes.length}개 영웅 상세 →
-          </Link>
-        </section>
-
-        {/* 1픽 영웅 */}
-        <section style={{ ...sectionCard, ...area('firstpick') }}>
-          <h2 style={sectionTitle}>1픽 영웅</h2>
-          <span style={sectionHint}>밴 4장 이후에도 살아남아 첫 픽으로 잡힌 영웅</span>
-          {firstPicks.length === 0 ? (
-            <EmptyHint>기록이 없습니다.</EmptyHint>
-          ) : (
-            <div style={fixedBox}>
-            <table style={{ borderCollapse: 'collapse' }}>
-              <thead><tr>
-                <th style={{ ...th, textAlign: 'left' }}>영웅</th><th style={th}>횟수</th><th style={th}>승률</th>
-              </tr></thead>
-              <tbody>
-                {firstPicks.map((f) => (
-                  <tr key={f.hero}>
-                    <td style={tdLeft}><HeroCell hero={f.hero} /></td>
-                    <td style={td}>{f.picks}</td>
-                    <td style={{ ...td, color: rateColor(f.winRate) }}>{pct(f.winRate)} ({f.wins}/{f.picks})</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+              </div>
             </div>
-          )}
-        </section>
+          ))}
+        </div>
+        <Link href="/scrims/heroes" style={{
+          justifySelf: 'end', fontFamily: 'var(--font-ui)', fontWeight: 700,
+          fontSize: 'var(--fs-xs)', color: 'var(--cheese-green)', textDecoration: 'none' }}>
+          전체 {heroes.length}개 영웅 상세 →
+        </Link>
+      </section>
 
-        {/* 오프닝 밴 */}
-        <section style={{ ...sectionCard, ...area('openban') }}>
+      {/* 오프닝 밴 · 1픽 — 2열 */}
+      <div style={pairRow}>
+        <section style={sectionCard}>
           <h2 style={sectionTitle}>오프닝 밴</h2>
           <span style={sectionHint}>전역 밴 1~4 · 밴 비율 = 오프닝 밴 경기/전체 · 선/후 = 자른 팀</span>
           {openBans.length === 0 ? (
@@ -357,12 +330,38 @@ export default function ScrimDashboard({ scrims }: { scrims: Scrim[] }) {
             </div>
           )}
         </section>
+
+        {/* 1픽 영웅 */}
+        <section style={sectionCard}>
+          <h2 style={sectionTitle}>1픽 영웅</h2>
+          <span style={sectionHint}>밴 4장 이후에도 살아남아 첫 픽으로 잡힌 영웅</span>
+          {firstPicks.length === 0 ? (
+            <EmptyHint>기록이 없습니다.</EmptyHint>
+          ) : (
+            <div style={fixedBox}>
+            <table style={{ borderCollapse: 'collapse' }}>
+              <thead><tr>
+                <th style={{ ...th, textAlign: 'left' }}>영웅</th><th style={th}>횟수</th><th style={th}>승률</th>
+              </tr></thead>
+              <tbody>
+                {firstPicks.map((f) => (
+                  <tr key={f.hero}>
+                    <td style={tdLeft}><HeroCell hero={f.hero} /></td>
+                    <td style={td}>{f.picks}</td>
+                    <td style={{ ...td, color: rateColor(f.winRate) }}>{pct(f.winRate)} ({f.wins}/{f.picks})</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            </div>
+          )}
+        </section>
       </div>
 
       {/* 조합 카드 — 시너지·카운터 한 행, 길면 카드 내부 스크롤 */}
       <div style={pairRow}>
         {/* 시너지 */}
-        <section style={{ ...sectionCard, ...area('synergy') }}>
+        <section style={sectionCard}>
           <h2 style={sectionTitle}>시너지 조합</h2>
           <span style={sectionHint}>같은 팀 2영웅 · {MIN_PAIR_GAMES}경기 이상 · 승률 50% 초과만</span>
           {synergy.length === 0 ? (
@@ -388,7 +387,7 @@ export default function ScrimDashboard({ scrims }: { scrims: Scrim[] }) {
         </section>
 
         {/* 카운터 */}
-        <section style={{ ...sectionCard, ...area('counters') }}>
+        <section style={sectionCard}>
           <h2 style={sectionTitle}>카운터 관계</h2>
           <span style={sectionHint}>상대로 만났을 때 · {MIN_PAIR_GAMES}경기 이상 · 승률 50% 초과만 · 왼쪽이 우세</span>
           {counters.length === 0 ? (
